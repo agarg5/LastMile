@@ -5,8 +5,8 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("primeservices@example.com");
+  const [password, setPassword] = useState("prime-pass");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
