@@ -5,19 +5,18 @@ from datetime import datetime
 
 from flask_socketio import SocketIO, emit
 
-from db import get_db_connection
+import db
 
 
 def generate_fake_location(socketio: SocketIO):
     """Generate fake driver locations for tracking and emit via SocketIO."""
-    conn = get_db_connection()
-    drivers = conn.execute('SELECT id, name FROM drivers').fetchall()
+    conn = db.get_db_connection()
+    drivers = db.fetchall(db.execute(conn, 'SELECT id, name FROM drivers'))
     conn.close()
 
     if not drivers:
         return
 
-    # Generate fake locations for each driver
     for driver in drivers:
         # Random location around NYC area
         latitude = 40.7128 + random.uniform(-0.1, 0.1)

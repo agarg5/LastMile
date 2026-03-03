@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 
+import db
+
 
 def validate_order_times(pickup_time_str, dropoff_time_str):
     """Validate order pickup and dropoff times."""
@@ -11,16 +13,13 @@ def validate_order_times(pickup_time_str, dropoff_time_str):
     except (ValueError, AttributeError):
         return False, "Invalid datetime format. Use ISO format (YYYY-MM-DDTHH:MM:SS)"
 
-    # Check if both are on the same day
     if pickup_time.date() != dropoff_time.date():
         return False, "Pickup and dropoff must be on the same day"
 
-    # Check if pickup is at least 15 minutes before dropoff
     time_diff = dropoff_time - pickup_time
     if time_diff < timedelta(minutes=15):
         return False, "Pickup time must be at least 15 minutes before dropoff time"
 
-    # Check if dropoff is at most 4 hours after pickup
     if time_diff > timedelta(hours=4):
         return False, "Dropoff time must be at most 4 hours after pickup time"
 
@@ -36,15 +35,8 @@ def find_available_driver(conn, pickup_time_str, dropoff_time_str, weight, exclu
     - Each driver has exactly one vehicle; we enforce the vehicle's:
       * max_weight: the order's weight must be <= max_weight
       * max_orders: maximum number of *overlapping* orders that vehicle can carry.
-        We consider orders overlapping if:
-          existing.pickup_time < new.dropoff_time AND
-          existing.dropoff_time > new.pickup_time
-      Only orders with status IN ('assigned', 'completed') are counted, since they
-      represent work that has been or will be performed.
-    - The algorithm is greedy: it returns the first driver that satisfies all
-      constraints, based on the ordering of shifts returned by SQLite.
-    - When exclude_driver_id is provided, that driver is skipped entirely. This is
-      used by the update path when the old driver is known to no longer fit.
+    - The algorithm is greedy: it returns the first driver that satisfies all constraints.
+    - When exclude_driver_id is provided, that driver is skipped entirely.
     """
     try:
         pickup_time = datetime.fromisoformat(
@@ -58,8 +50,7 @@ def find_available_driver(conn, pickup_time_str, dropoff_time_str, weight, exclu
     pickup_time_only = pickup_time.time()
     dropoff_time_only = dropoff_time.time()
 
-    # Find drivers with shifts on the order date
-    shifts = conn.execute('''
+    shifts = db.fetchall(db.execute(conn, '''
         SELECT s.*, d.id as driver_id, d.name as driver_name, v.id as vehicle_id,
                v.max_orders, v.max_weight
         FROM shifts s
@@ -69,7 +60,7 @@ def find_available_driver(conn, pickup_time_str, dropoff_time_str, weight, exclu
         AND s.start_time <= ?
         AND s.end_time >= ?
     ''', (order_date.isoformat(), pickup_time_only.strftime('%H:%M:%S'),
-          dropoff_time_only.strftime('%H:%M:%S'))).fetchall()
+          dropoff_time_only.strftime('%H:%M:%S'))))
 
     for shift in shifts:
         driver_id = shift['driver_id']
@@ -77,20 +68,13 @@ def find_available_driver(conn, pickup_time_str, dropoff_time_str, weight, exclu
         max_orders = shift['max_orders']
         max_weight = shift['max_weight']
 
-        # Skip if this is the excluded driver (for re-assignment checks)
         if exclude_driver_id and driver_id == exclude_driver_id:
             continue
 
-        # Check vehicle weight capacity
         if weight > max_weight:
             continue
 
-        # Count current assigned orders for this vehicle on the same day
-        # that overlap with the order time window.
-        # Two orders overlap if: (start1 < end2) AND (end1 > start2).
-        # This effectively limits the number of concurrent orders a vehicle
-        # can handle during any time window.
-        overlapping_orders = conn.execute('''
+        overlapping_orders = db.fetchone(db.execute(conn, '''
             SELECT COUNT(*) as count
             FROM orders
             WHERE vehicle_id = ?
@@ -98,15 +82,13 @@ def find_available_driver(conn, pickup_time_str, dropoff_time_str, weight, exclu
             AND DATE(pickup_time) = ?
             AND pickup_time < ? AND dropoff_time > ?
         ''', (vehicle_id, order_date.isoformat(),
-              dropoff_time_str, pickup_time_str)).fetchone()
+              dropoff_time_str, pickup_time_str)))
 
         current_order_count = overlapping_orders['count'] if overlapping_orders else 0
 
-        # Check if vehicle has capacity
         if current_order_count >= max_orders:
             continue
 
-        # Driver and vehicle are available!
         return driver_id, vehicle_id
 
     return None, None
@@ -118,7 +100,7 @@ def assign_driver_to_order(conn, order_id, pickup_time, dropoff_time, weight, ex
         conn, pickup_time, dropoff_time, weight, exclude_driver_id)
 
     if driver_id and vehicle_id:
-        conn.execute('''
+        db.execute(conn, '''
             UPDATE orders
             SET driver_id = ?, vehicle_id = ?, status = 'assigned'
             WHERE id = ?
@@ -126,8 +108,7 @@ def assign_driver_to_order(conn, order_id, pickup_time, dropoff_time, weight, ex
         conn.commit()
         return driver_id, vehicle_id
     else:
-        # No driver available, set to pending
-        conn.execute('''
+        db.execute(conn, '''
             UPDATE orders
             SET driver_id = NULL, vehicle_id = NULL, status = 'pending'
             WHERE id = ?
