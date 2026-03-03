@@ -5,10 +5,10 @@ FROM node:20-alpine AS build
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
+COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm install
 
-COPY . .
+COPY frontend/ .
 
 # VITE_API_URL is set at build time via Railway environment variables
 ARG VITE_API_URL
