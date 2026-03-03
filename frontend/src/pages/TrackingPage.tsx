@@ -23,7 +23,7 @@ export default function TrackingPage() {
   const [connected, setConnected] = useState(false);
 
   const socketUrl =
-    "https://transportation-management-system-backend-wkv7.onrender.com";
+    import.meta.env.VITE_API_URL || "http://localhost:8000";
 
   useEffect(() => {
     // Connect to Socket.IO server

@@ -1,7 +1,7 @@
 import type { Order, Driver, Merchant, Shift } from "../types";
 
 const API_BASE =
-  "https://transportation-management-system-backend-wkv7.onrender.com";
+  import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 // Simple auth storage in localStorage
 const AUTH_STORAGE_KEY = "tms_auth";

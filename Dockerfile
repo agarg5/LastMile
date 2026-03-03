@@ -1,36 +1,28 @@
-# Use official Python runtime as base image
+# Backend Dockerfile for Railway deployment
 FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
-# Install SQLite (included in Python image, but ensure dev tools if needed)
-RUN apt-get update && apt-get install -y sqlite3 && rm -rf /var/lib/apt/lists/*
+# Install system dependencies for psycopg2
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
+# Copy and install Python dependencies
 COPY backend/requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend application code
+# Copy backend application code (includes CSV seed data)
 COPY backend/ ./backend/
 
-# Create directory for SQLite database
+# Create directory for SQLite database (fallback for local dev)
 RUN mkdir -p /app/data
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV DATABASE_PATH=/app/data/database.db
+ENV FLASK_DEBUG=false
+ENV ALLOW_UNSAFE_WERKZEUG=false
 
-# Expose port (adjust as needed)
 EXPOSE 8000
-EXPOSE 3000
 
-# Run the application
-COPY start.sh .
-
-RUN chmod +x start.sh
-
-# Run both frontend and backend
-CMD ["./start.sh"]
+# Initialize DB schema, seed data, then start gunicorn with eventlet for WebSocket
+CMD ["sh", "-c", "cd /app/backend && python -c 'from app import init_db; init_db(); print(\"DB initialized\")' && python load_data.py 2>/dev/null || true && gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:${PORT:-8000} app:app"]

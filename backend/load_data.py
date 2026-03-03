@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 """
-Load CSV datasets into the SQLite database.
+Load CSV datasets into the database (PostgreSQL or SQLite).
 """
 
 import csv
-import sqlite3
 import os
 
 from werkzeug.security import generate_password_hash
 
-# Get the directory where this script is located
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE_PATH = os.getenv('DATABASE_PATH', os.path.join(SCRIPT_DIR, '..', 'data', 'database.db'))
+import db
 
-def get_db_connection():
-    """Create a database connection."""
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _integrity_error():
+    if db.using_postgres():
+        import psycopg2
+        return psycopg2.IntegrityError
+    else:
+        import sqlite3
+        return sqlite3.IntegrityError
+
 
 def load_merchants():
     """Load merchants from CSV."""
-    conn = get_db_connection()
+    conn = db.get_db_connection()
     count = 0
-
-    # Explicitly use a hash algorithm that works even when hashlib.scrypt
-    # is unavailable in the current Python build (e.g., some macOS builds).
     password_method = os.getenv('PASSWORD_HASH_METHOD', 'pbkdf2:sha256')
 
     csv_path = os.path.join(SCRIPT_DIR, 'merchants.csv')
@@ -33,8 +33,6 @@ def load_merchants():
         reader = csv.DictReader(f)
         for row in reader:
             try:
-                # Support either plaintext password (preferred for the assignment)
-                # or an existing password_hash column for backwards compatibility.
                 raw_password = row.get('password')
                 existing_hash = row.get('password_hash')
 
@@ -43,13 +41,21 @@ def load_merchants():
                 else:
                     password_hash = existing_hash
 
-                conn.execute(
-                    'INSERT INTO merchants (id, name, email, password_hash) VALUES (?, ?, ?, ?)',
-                    (row['id'], row['name'], row['email'], password_hash)
-                )
+                if db.using_postgres():
+                    db.execute(conn,
+                        'INSERT INTO merchants (id, name, email, password_hash) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
+                        (row['id'], row['name'], row['email'], password_hash))
+                else:
+                    db.execute(conn,
+                        'INSERT OR IGNORE INTO merchants (id, name, email, password_hash) VALUES (?, ?, ?, ?)',
+                        (row['id'], row['name'], row['email'], password_hash))
                 count += 1
-            except sqlite3.IntegrityError:
+            except _integrity_error():
                 print(f"  Skipping duplicate merchant: {row['name']}")
+
+    # Reset PostgreSQL sequence to max id
+    if db.using_postgres():
+        db.execute(conn, "SELECT setval('merchants_id_seq', (SELECT COALESCE(MAX(id), 1) FROM merchants))")
 
     conn.commit()
     conn.close()
@@ -58,7 +64,7 @@ def load_merchants():
 
 def load_drivers():
     """Load drivers from CSV."""
-    conn = get_db_connection()
+    conn = db.get_db_connection()
     count = 0
 
     csv_path = os.path.join(SCRIPT_DIR, 'drivers.csv')
@@ -66,13 +72,20 @@ def load_drivers():
         reader = csv.DictReader(f)
         for row in reader:
             try:
-                conn.execute(
-                    'INSERT INTO drivers (id, name) VALUES (?, ?)',
-                    (row['id'], row['name'])
-                )
+                if db.using_postgres():
+                    db.execute(conn,
+                        'INSERT INTO drivers (id, name) VALUES (?, ?) ON CONFLICT DO NOTHING',
+                        (row['id'], row['name']))
+                else:
+                    db.execute(conn,
+                        'INSERT OR IGNORE INTO drivers (id, name) VALUES (?, ?)',
+                        (row['id'], row['name']))
                 count += 1
-            except sqlite3.IntegrityError:
+            except _integrity_error():
                 print(f"  Skipping duplicate driver: {row['name']}")
+
+    if db.using_postgres():
+        db.execute(conn, "SELECT setval('drivers_id_seq', (SELECT COALESCE(MAX(id), 1) FROM drivers))")
 
     conn.commit()
     conn.close()
@@ -81,7 +94,7 @@ def load_drivers():
 
 def load_vehicles():
     """Load vehicles from CSV."""
-    conn = get_db_connection()
+    conn = db.get_db_connection()
     count = 0
 
     csv_path = os.path.join(SCRIPT_DIR, 'vehicles.csv')
@@ -89,13 +102,20 @@ def load_vehicles():
         reader = csv.DictReader(f)
         for row in reader:
             try:
-                conn.execute(
-                    'INSERT INTO vehicles (id, driver_id, max_orders, max_weight) VALUES (?, ?, ?, ?)',
-                    (row['id'], row['driver_id'], row['max_orders'], row['max_weight'])
-                )
+                if db.using_postgres():
+                    db.execute(conn,
+                        'INSERT INTO vehicles (id, driver_id, max_orders, max_weight) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
+                        (row['id'], row['driver_id'], row['max_orders'], row['max_weight']))
+                else:
+                    db.execute(conn,
+                        'INSERT OR IGNORE INTO vehicles (id, driver_id, max_orders, max_weight) VALUES (?, ?, ?, ?)',
+                        (row['id'], row['driver_id'], row['max_orders'], row['max_weight']))
                 count += 1
-            except sqlite3.IntegrityError:
+            except _integrity_error():
                 print(f"  Skipping duplicate vehicle: {row['id']}")
+
+    if db.using_postgres():
+        db.execute(conn, "SELECT setval('vehicles_id_seq', (SELECT COALESCE(MAX(id), 1) FROM vehicles))")
 
     conn.commit()
     conn.close()
@@ -104,7 +124,7 @@ def load_vehicles():
 
 def load_shifts():
     """Load shifts from CSV."""
-    conn = get_db_connection()
+    conn = db.get_db_connection()
     count = 0
 
     csv_path = os.path.join(SCRIPT_DIR, 'shifts.csv')
@@ -112,13 +132,20 @@ def load_shifts():
         reader = csv.DictReader(f)
         for row in reader:
             try:
-                conn.execute(
-                    'INSERT INTO shifts (id, driver_id, shift_date, start_time, end_time) VALUES (?, ?, ?, ?, ?)',
-                    (row['id'], row['driver_id'], row['shift_date'], row['start_time'], row['end_time'])
-                )
+                if db.using_postgres():
+                    db.execute(conn,
+                        'INSERT INTO shifts (id, driver_id, shift_date, start_time, end_time) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
+                        (row['id'], row['driver_id'], row['shift_date'], row['start_time'], row['end_time']))
+                else:
+                    db.execute(conn,
+                        'INSERT OR IGNORE INTO shifts (id, driver_id, shift_date, start_time, end_time) VALUES (?, ?, ?, ?, ?)',
+                        (row['id'], row['driver_id'], row['shift_date'], row['start_time'], row['end_time']))
                 count += 1
-            except sqlite3.IntegrityError:
+            except _integrity_error():
                 print(f"  Skipping duplicate shift: driver {row['driver_id']} on {row['shift_date']}")
+
+    if db.using_postgres():
+        db.execute(conn, "SELECT setval('shifts_id_seq', (SELECT COALESCE(MAX(id), 1) FROM shifts))")
 
     conn.commit()
     conn.close()
@@ -127,7 +154,7 @@ def load_shifts():
 
 def load_orders():
     """Load orders from CSV."""
-    conn = get_db_connection()
+    conn = db.get_db_connection()
     count = 0
 
     csv_path = os.path.join(SCRIPT_DIR, 'orders.csv')
@@ -139,16 +166,34 @@ def load_orders():
                 vehicle_id = row['vehicle_id'] if row['vehicle_id'] else None
                 description = row.get('description', '')
 
-                conn.execute(
-                    'INSERT INTO orders (id, merchant_id, driver_id, vehicle_id, status, description, pickup_time, dropoff_time, weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    (row['id'], row['merchant_id'], driver_id, vehicle_id, row['status'],
-                     description, row['pickup_time'], row['dropoff_time'], row['weight'])
-                )
+                if db.using_postgres():
+                    db.execute(conn,
+                        '''INSERT INTO orders (id, merchant_id, driver_id, vehicle_id, status, description, pickup_time, dropoff_time, weight)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT (id) DO UPDATE SET
+                             merchant_id = EXCLUDED.merchant_id,
+                             driver_id = EXCLUDED.driver_id,
+                             vehicle_id = EXCLUDED.vehicle_id,
+                             status = EXCLUDED.status,
+                             description = EXCLUDED.description,
+                             pickup_time = EXCLUDED.pickup_time,
+                             dropoff_time = EXCLUDED.dropoff_time,
+                             weight = EXCLUDED.weight''',
+                        (row['id'], row['merchant_id'], driver_id, vehicle_id, row['status'],
+                         description, row['pickup_time'], row['dropoff_time'], row['weight']))
+                else:
+                    db.execute(conn,
+                        'INSERT OR REPLACE INTO orders (id, merchant_id, driver_id, vehicle_id, status, description, pickup_time, dropoff_time, weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                        (row['id'], row['merchant_id'], driver_id, vehicle_id, row['status'],
+                         description, row['pickup_time'], row['dropoff_time'], row['weight']))
                 count += 1
-            except sqlite3.IntegrityError as e:
+            except _integrity_error():
                 print(f"  Skipping duplicate order: {row['id']}")
             except Exception as e:
                 print(f"  Error loading order {row['id']}: {e}")
+
+    if db.using_postgres():
+        db.execute(conn, "SELECT setval('orders_id_seq', (SELECT COALESCE(MAX(id), 1) FROM orders))")
 
     conn.commit()
     conn.close()
@@ -157,27 +202,34 @@ def load_orders():
 
 def assign_pending_orders():
     """Run driver assignment for all pending orders after CSV import."""
-    from app import assign_driver_to_order
+    from orders_service import assign_driver_to_order
 
-    conn = get_db_connection()
+    conn = db.get_db_connection()
 
-    # Get all pending orders
-    pending_orders = conn.execute('''
+    pending_orders = db.fetchall(db.execute(conn, '''
         SELECT id, pickup_time, dropoff_time, weight
         FROM orders
         WHERE status = 'pending'
         ORDER BY id
-    ''').fetchall()
+    '''))
 
     print(f"\nProcessing {len(pending_orders)} pending orders for driver assignment...")
 
     assigned = 0
     for order in pending_orders:
+        pickup_str = order['pickup_time']
+        dropoff_str = order['dropoff_time']
+        # PostgreSQL returns datetime objects; convert to string
+        if not isinstance(pickup_str, str):
+            pickup_str = pickup_str.isoformat()
+        if not isinstance(dropoff_str, str):
+            dropoff_str = dropoff_str.isoformat()
+
         driver_id, vehicle_id = assign_driver_to_order(
             conn,
             order['id'],
-            order['pickup_time'],
-            order['dropoff_time'],
+            pickup_str,
+            dropoff_str,
             order['weight']
         )
         if driver_id and vehicle_id:
@@ -193,10 +245,10 @@ if __name__ == '__main__':
     print("Loading CSV data into database...")
     print("=" * 50)
 
-    # Ensure database directory exists
-    os.makedirs(os.path.dirname(DATABASE_PATH) if os.path.dirname(DATABASE_PATH) else '.', exist_ok=True)
+    if not db.using_postgres():
+        DATABASE_PATH = db.DATABASE_PATH
+        os.makedirs(os.path.dirname(DATABASE_PATH) if os.path.dirname(DATABASE_PATH) else '.', exist_ok=True)
 
-    # Check if CSV files exist
     required_files = ['merchants.csv', 'drivers.csv', 'vehicles.csv', 'shifts.csv', 'orders.csv']
     missing_files = [f for f in required_files if not os.path.exists(os.path.join(SCRIPT_DIR, f))]
 
@@ -205,19 +257,16 @@ if __name__ == '__main__':
         print("Please run generate_datasets.py first to create the CSV files.")
         exit(1)
 
-    # Import app to initialize database schema
     from app import init_db
     init_db()
-    print("Database schema initialized\n")
+    print(f"Database schema initialized ({'PostgreSQL' if db.using_postgres() else 'SQLite'})\n")
 
-    # Load data
     merchants_count = load_merchants()
     drivers_count = load_drivers()
     vehicles_count = load_vehicles()
     shifts_count = load_shifts()
     orders_count = load_orders()
 
-    # Run driver assignment for pending orders
     assigned_count, still_pending_count = assign_pending_orders()
 
     print("=" * 50)
@@ -230,4 +279,3 @@ if __name__ == '__main__':
     print(f"  - {orders_count} orders loaded")
     print(f"  - {assigned_count} orders assigned to drivers")
     print(f"  - {still_pending_count} orders still pending")
-

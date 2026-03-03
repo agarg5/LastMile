@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import threading
 from datetime import datetime, timedelta, time as dt_time
 from functools import wraps
@@ -44,6 +43,16 @@ def init_db():
     return db.init_db()
 
 
+def _integrity_error():
+    """Return the IntegrityError class for the active database backend."""
+    if db.using_postgres():
+        import psycopg2
+        return psycopg2.IntegrityError
+    else:
+        import sqlite3
+        return sqlite3.IntegrityError
+
+
 # JWT configuration (simple symmetric HS256 token)
 JWT_SECRET = os.getenv('JWT_SECRET', 'dev-secret-key-change-me')
 JWT_ALGORITHM = 'HS256'
@@ -58,7 +67,7 @@ lock_manager = threading.Lock()
 
 
 def create_access_token(merchant_row):
-    """Create a signed JWT for a merchant row (sqlite3.Row)."""
+    """Create a signed JWT for a merchant row."""
     now = datetime.utcnow()
     payload = {
         'sub': merchant_row['id'],
@@ -81,20 +90,19 @@ def create_access_token(merchant_row):
 def get_drivers():
     """Retrieve drivers and their shifts."""
     conn = get_db_connection()
-    drivers = conn.execute('SELECT * FROM drivers ORDER BY id').fetchall()
+    drivers = db.fetchall(db.execute(conn, 'SELECT * FROM drivers ORDER BY id'))
 
     result = []
     for driver in drivers:
         driver_id = driver['id']
-        # Get shifts for this driver
-        shifts = conn.execute('''
+        shifts = db.fetchall(db.execute(conn, '''
             SELECT * FROM shifts
             WHERE driver_id = ?
             ORDER BY shift_date, start_time
-        ''', (driver_id,)).fetchall()
+        ''', (driver_id,)))
 
         driver_data = dict(driver)
-        driver_data['shifts'] = [dict(shift) for shift in shifts]
+        driver_data['shifts'] = shifts
         result.append(driver_data)
 
     conn.close()
@@ -107,14 +115,14 @@ def get_drivers():
 def get_shifts():
     """Get all shifts."""
     conn = get_db_connection()
-    shifts = conn.execute('''
+    shifts = db.fetchall(db.execute(conn, '''
         SELECT s.*, d.name as driver_name
         FROM shifts s
         LEFT JOIN drivers d ON s.driver_id = d.id
         ORDER BY s.shift_date, s.start_time
-    ''').fetchall()
+    '''))
     conn.close()
-    return jsonify([dict(shift) for shift in shifts])
+    return jsonify(shifts)
 
 
 @app.route('/drivers', methods=['POST'])
@@ -128,17 +136,23 @@ def create_driver():
 
     conn = get_db_connection()
     try:
-        cursor = conn.execute(
-            'INSERT INTO drivers (name) VALUES (?)',
-            (name,)
-        )
+        if db.using_postgres():
+            cur = db.execute(conn,
+                'INSERT INTO drivers (name) VALUES (?) RETURNING id',
+                (name,))
+            driver_id = db.fetchone(cur)['id']
+        else:
+            cur = db.execute(conn,
+                'INSERT INTO drivers (name) VALUES (?)',
+                (name,))
+            driver_id = cur.lastrowid
         conn.commit()
-        driver_id = cursor.lastrowid
-        driver = conn.execute(
-            'SELECT * FROM drivers WHERE id = ?', (driver_id,)).fetchone()
+        driver = db.fetchone(db.execute(conn,
+            'SELECT * FROM drivers WHERE id = ?', (driver_id,)))
         conn.close()
-        return jsonify(dict(driver)), 201
-    except sqlite3.IntegrityError:
+        return jsonify(driver), 201
+    except _integrity_error():
+        conn.rollback()
         conn.close()
         return jsonify({"error": "Driver with this name already exists"}), 400
 
@@ -156,25 +170,30 @@ def create_vehicle():
 
     conn = get_db_connection()
 
-    # Ensure driver exists
-    driver = conn.execute(
-        'SELECT * FROM drivers WHERE id = ?', (driver_id,)).fetchone()
+    driver = db.fetchone(db.execute(conn,
+        'SELECT * FROM drivers WHERE id = ?', (driver_id,)))
     if not driver:
         conn.close()
         return jsonify({"error": "Driver not found"}), 404
 
     try:
-        cursor = conn.execute(
-            'INSERT INTO vehicles (driver_id, max_orders, max_weight) VALUES (?, ?, ?)',
-            (driver_id, max_orders, max_weight)
-        )
+        if db.using_postgres():
+            cur = db.execute(conn,
+                'INSERT INTO vehicles (driver_id, max_orders, max_weight) VALUES (?, ?, ?) RETURNING id',
+                (driver_id, max_orders, max_weight))
+            vehicle_id = db.fetchone(cur)['id']
+        else:
+            cur = db.execute(conn,
+                'INSERT INTO vehicles (driver_id, max_orders, max_weight) VALUES (?, ?, ?)',
+                (driver_id, max_orders, max_weight))
+            vehicle_id = cur.lastrowid
         conn.commit()
-        vehicle_id = cursor.lastrowid
-        vehicle = conn.execute(
-            'SELECT * FROM vehicles WHERE id = ?', (vehicle_id,)).fetchone()
+        vehicle = db.fetchone(db.execute(conn,
+            'SELECT * FROM vehicles WHERE id = ?', (vehicle_id,)))
         conn.close()
-        return jsonify(dict(vehicle)), 201
-    except sqlite3.IntegrityError:
+        return jsonify(vehicle), 201
+    except _integrity_error():
+        conn.rollback()
         conn.close()
         return jsonify({"error": "Vehicle for this driver already exists"}), 400
 
@@ -193,25 +212,30 @@ def create_shift():
 
     conn = get_db_connection()
 
-    # Ensure driver exists
-    driver = conn.execute(
-        'SELECT * FROM drivers WHERE id = ?', (driver_id,)).fetchone()
+    driver = db.fetchone(db.execute(conn,
+        'SELECT * FROM drivers WHERE id = ?', (driver_id,)))
     if not driver:
         conn.close()
         return jsonify({"error": "Driver not found"}), 404
 
     try:
-        cursor = conn.execute(
-            'INSERT INTO shifts (driver_id, shift_date, start_time, end_time) VALUES (?, ?, ?, ?)',
-            (driver_id, shift_date, start_time, end_time)
-        )
+        if db.using_postgres():
+            cur = db.execute(conn,
+                'INSERT INTO shifts (driver_id, shift_date, start_time, end_time) VALUES (?, ?, ?, ?) RETURNING id',
+                (driver_id, shift_date, start_time, end_time))
+            shift_id = db.fetchone(cur)['id']
+        else:
+            cur = db.execute(conn,
+                'INSERT INTO shifts (driver_id, shift_date, start_time, end_time) VALUES (?, ?, ?, ?)',
+                (driver_id, shift_date, start_time, end_time))
+            shift_id = cur.lastrowid
         conn.commit()
-        shift_id = cursor.lastrowid
-        shift = conn.execute(
-            'SELECT * FROM shifts WHERE id = ?', (shift_id,)).fetchone()
+        shift = db.fetchone(db.execute(conn,
+            'SELECT * FROM shifts WHERE id = ?', (shift_id,)))
         conn.close()
-        return jsonify(dict(shift)), 201
-    except sqlite3.IntegrityError:
+        return jsonify(shift), 201
+    except _integrity_error():
+        conn.rollback()
         conn.close()
         return jsonify({"error": "Shift for this driver and date already exists"}), 400
 
@@ -232,7 +256,6 @@ def get_orders():
 
     conn = get_db_connection()
 
-    # Build WHERE clause with search
     where_clause = "o.merchant_id = ?"
     params = [merchant_id]
 
@@ -241,11 +264,9 @@ def get_orders():
         search_pattern = f"%{search}%"
         params.extend([search_pattern, search_pattern, search_pattern])
 
-    # Get total count with search
     total_query = f'SELECT COUNT(*) as count FROM orders o LEFT JOIN drivers d ON o.driver_id = d.id WHERE {where_clause}'
-    total = conn.execute(total_query, tuple(params)).fetchone()['count']
+    total = db.fetchone(db.execute(conn, total_query, tuple(params)))['count']
 
-    # Get paginated orders with all required fields
     offset = (page - 1) * per_page
     orders_query = f'''
         SELECT o.id as order_id, o.merchant_id, o.status, o.driver_id,
@@ -257,26 +278,23 @@ def get_orders():
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
     '''
-    orders = conn.execute(orders_query, tuple(
-        params + [per_page, offset])).fetchall()
+    orders = db.fetchall(db.execute(conn, orders_query, tuple(
+        params + [per_page, offset])))
 
     conn.close()
 
-    # Format the response to match frontend expectations
     formatted_orders = []
-    for order in orders:
-        order_dict = dict(order)
+    for order_dict in orders:
         formatted_order = {
             'order_id': order_dict['order_id'],
             'merchant_id': order_dict['merchant_id'],
             'status': order_dict['status'],
             'driver_id': order_dict['driver_id'],
             'description': order_dict['description'],
-            'pickup_time': order_dict['pickup_time'],
-            'dropoff_time': order_dict['dropoff_time'],
+            'pickup_time': _serialize_timestamp(order_dict['pickup_time']),
+            'dropoff_time': _serialize_timestamp(order_dict['dropoff_time']),
             'weight': order_dict['weight'],
         }
-        # Add driver object if driver exists
         if order_dict['driver_id'] and order_dict['driver_name']:
             formatted_order['driver'] = {
                 'id': order_dict['driver_id'],
@@ -284,10 +302,8 @@ def get_orders():
             }
         formatted_orders.append(formatted_order)
 
-    # Calculate total pages for pagination metadata
     total_pages = (total + per_page - 1) // per_page if per_page else 1
 
-    # Return a structured response with pagination info
     return jsonify({
         'orders': formatted_orders,
         'total': total,
@@ -295,6 +311,15 @@ def get_orders():
         'per_page': per_page,
         'total_pages': total_pages,
     })
+
+
+def _serialize_timestamp(value):
+    """Ensure timestamp is returned as an ISO string (PostgreSQL returns datetime objects)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return value.isoformat()
 
 
 @app.route('/orders', methods=['POST'])
@@ -310,49 +335,48 @@ def create_order():
     if not all([merchant_id, pickup_time, dropoff_time, weight]):
         return jsonify({"error": "merchant_id, pickup_time, dropoff_time, and weight are required"}), 400
 
-    # Validate times
     valid, error_msg = validate_order_times(pickup_time, dropoff_time)
     if not valid:
         return jsonify({"error": error_msg}), 400
 
     conn = get_db_connection()
 
-    # Check if merchant exists
-    merchant = conn.execute(
-        'SELECT * FROM merchants WHERE id = ?', (merchant_id,)).fetchone()
+    merchant = db.fetchone(db.execute(conn,
+        'SELECT * FROM merchants WHERE id = ?', (merchant_id,)))
     if not merchant:
         conn.close()
         return jsonify({"error": "Merchant not found"}), 404
 
-    # Create order with pending status
-    cursor = conn.execute(
-        'INSERT INTO orders (merchant_id, description, status, pickup_time, dropoff_time, weight) VALUES (?, ?, ?, ?, ?, ?)',
-        (merchant_id, description, 'pending', pickup_time, dropoff_time, weight)
-    )
-    order_id = cursor.lastrowid
+    if db.using_postgres():
+        cur = db.execute(conn,
+            'INSERT INTO orders (merchant_id, description, status, pickup_time, dropoff_time, weight) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
+            (merchant_id, description, 'pending', pickup_time, dropoff_time, weight))
+        order_id = db.fetchone(cur)['id']
+    else:
+        cur = db.execute(conn,
+            'INSERT INTO orders (merchant_id, description, status, pickup_time, dropoff_time, weight) VALUES (?, ?, ?, ?, ?, ?)',
+            (merchant_id, description, 'pending', pickup_time, dropoff_time, weight))
+        order_id = cur.lastrowid
 
-    # Try to assign a driver
     driver_id, vehicle_id = assign_driver_to_order(
         conn, order_id, pickup_time, dropoff_time, weight)
 
-    # Get the order with driver info
-    order = conn.execute('''
+    order = db.fetchone(db.execute(conn, '''
         SELECT o.id as order_id, o.merchant_id, o.description, o.pickup_time,
                o.dropoff_time, o.weight, o.status, d.id as driver_id, d.name as driver_name
         FROM orders o
         LEFT JOIN drivers d ON o.driver_id = d.id
         WHERE o.id = ?
-    ''', (order_id,)).fetchone()
+    ''', (order_id,)))
 
     conn.close()
 
-    # Format response
     response = {
         "order_id": order['order_id'],
         "merchant_id": order['merchant_id'],
         "description": order['description'],
-        "pickup_time": order['pickup_time'],
-        "dropoff_time": order['dropoff_time'],
+        "pickup_time": _serialize_timestamp(order['pickup_time']),
+        "dropoff_time": _serialize_timestamp(order['dropoff_time']),
         "weight": order['weight'],
         "status": order['status']
     }
@@ -381,7 +405,6 @@ def update_order(order_id):
     if not merchant_id:
         return jsonify({"error": "merchant_id is required"}), 400
 
-    # Get lock for this order
     with lock_manager:
         if order_id not in order_locks:
             order_locks[order_id] = threading.Lock()
@@ -390,64 +413,56 @@ def update_order(order_id):
     with order_lock:
         conn = get_db_connection()
 
-        # Get current order
-        order = conn.execute(
-            'SELECT * FROM orders WHERE id = ?', (order_id,)).fetchone()
+        order = db.fetchone(db.execute(conn,
+            'SELECT * FROM orders WHERE id = ?', (order_id,)))
         if not order:
             conn.close()
             return jsonify({"error": "Order not found"}), 404
 
-        # Check merchant ownership
         if order['merchant_id'] != merchant_id:
             conn.close()
             return jsonify({"error": "Only the merchant who created the order can edit it"}), 403
 
-        # Check if order is completed or cancelled
         if order['status'] in ['completed', 'cancelled']:
             conn.close()
             return jsonify({"error": "Cannot edit completed or cancelled orders"}), 400
 
-        # Get fields to update
         description = data.get('description', order['description'])
-        pickup_time = data.get('pickup_time', order['pickup_time'])
-        dropoff_time = data.get('dropoff_time', order['dropoff_time'])
+        pickup_time = data.get('pickup_time', _serialize_timestamp(order['pickup_time']))
+        dropoff_time = data.get('dropoff_time', _serialize_timestamp(order['dropoff_time']))
         weight = data.get('weight', order['weight'])
 
-        # Validate times if they changed
-        if pickup_time != order['pickup_time'] or dropoff_time != order['dropoff_time']:
+        order_pickup_str = _serialize_timestamp(order['pickup_time'])
+        order_dropoff_str = _serialize_timestamp(order['dropoff_time'])
+
+        if pickup_time != order_pickup_str or dropoff_time != order_dropoff_str:
             valid, error_msg = validate_order_times(pickup_time, dropoff_time)
             if not valid:
                 conn.close()
                 return jsonify({"error": error_msg}), 400
 
-        # Check if time or weight changed (need to re-assign)
-        time_changed = (pickup_time != order['pickup_time'] or
-                        dropoff_time != order['dropoff_time'])
+        time_changed = (pickup_time != order_pickup_str or
+                        dropoff_time != order_dropoff_str)
         weight_changed = weight != order['weight']
         needs_reassignment = time_changed or weight_changed
 
-        # Update order
-        conn.execute('''
+        db.execute(conn, '''
             UPDATE orders
             SET description = ?, pickup_time = ?, dropoff_time = ?, weight = ?
             WHERE id = ?
         ''', (description, pickup_time, dropoff_time, weight, order_id))
 
-        # Re-run assignment logic if needed
         if needs_reassignment:
             old_driver_id = order['driver_id']
             driver_id = None
             vehicle_id = None
 
-            # Check if old driver still fits
             if old_driver_id:
-                # Get vehicle for old driver
-                vehicle = conn.execute(
+                vehicle = db.fetchone(db.execute(conn,
                     'SELECT id, max_orders, max_weight FROM vehicles WHERE driver_id = ?',
-                    (old_driver_id,)).fetchone()
+                    (old_driver_id,)))
 
                 if vehicle:
-                    # Check if driver has a shift on the order date
                     order_date = datetime.fromisoformat(
                         pickup_time.replace('Z', '+00:00')).date()
                     pickup_time_only = datetime.fromisoformat(
@@ -455,7 +470,7 @@ def update_order(order_id):
                     dropoff_time_only = datetime.fromisoformat(
                         dropoff_time.replace('Z', '+00:00')).time()
 
-                    shift = conn.execute('''
+                    shift = db.fetchone(db.execute(conn, '''
                         SELECT * FROM shifts
                         WHERE driver_id = ?
                         AND shift_date = ?
@@ -463,16 +478,11 @@ def update_order(order_id):
                         AND end_time >= ?
                     ''', (old_driver_id, order_date.isoformat(),
                           pickup_time_only.strftime('%H:%M:%S'),
-                          dropoff_time_only.strftime('%H:%M:%S'))).fetchone()
+                          dropoff_time_only.strftime('%H:%M:%S'))))
 
                     if shift:
-                        # Check vehicle weight capacity
                         if weight <= vehicle['max_weight']:
-                            # Check current order count (excluding this order).
-                            # Two orders overlap if: (start1 < end2) AND (end1 > start2).
-                            # This ensures we respect max_orders as a limit on
-                            # concurrent work for that vehicle.
-                            overlapping = conn.execute('''
+                            overlapping = db.fetchone(db.execute(conn, '''
                                 SELECT COUNT(*) as count
                                 FROM orders
                                 WHERE vehicle_id = ?
@@ -481,28 +491,24 @@ def update_order(order_id):
                                 AND id != ?
                                 AND pickup_time < ? AND dropoff_time > ?
                             ''', (vehicle['id'], order_date.isoformat(), order_id,
-                                  dropoff_time, pickup_time)).fetchone()
+                                  dropoff_time, pickup_time)))
 
                             if overlapping['count'] < vehicle['max_orders']:
-                                # Old driver still fits
                                 driver_id = old_driver_id
                                 vehicle_id = vehicle['id']
 
-            # If old driver doesn't fit, find a new one
             if not driver_id:
                 driver_id, vehicle_id = find_available_driver(
                     conn, pickup_time, dropoff_time, weight, exclude_driver_id=old_driver_id)
 
-            # Assign driver
             if driver_id and vehicle_id:
-                conn.execute('''
+                db.execute(conn, '''
                     UPDATE orders
                     SET driver_id = ?, vehicle_id = ?, status = 'assigned'
                     WHERE id = ?
                 ''', (driver_id, vehicle_id, order_id))
             else:
-                # No driver available
-                conn.execute('''
+                db.execute(conn, '''
                     UPDATE orders
                     SET driver_id = NULL, vehicle_id = NULL, status = 'pending'
                     WHERE id = ?
@@ -510,24 +516,22 @@ def update_order(order_id):
 
         conn.commit()
 
-        # Get updated order
-        updated_order = conn.execute('''
+        updated_order = db.fetchone(db.execute(conn, '''
             SELECT o.id as order_id, o.merchant_id, o.description, o.pickup_time,
                    o.dropoff_time, o.weight, o.status, d.id as driver_id, d.name as driver_name
             FROM orders o
             LEFT JOIN drivers d ON o.driver_id = d.id
             WHERE o.id = ?
-        ''', (order_id,)).fetchone()
+        ''', (order_id,)))
 
         conn.close()
 
-        # Format response
         response = {
             "order_id": updated_order['order_id'],
             "merchant_id": updated_order['merchant_id'],
             "description": updated_order['description'],
-            "pickup_time": updated_order['pickup_time'],
-            "dropoff_time": updated_order['dropoff_time'],
+            "pickup_time": _serialize_timestamp(updated_order['pickup_time']),
+            "dropoff_time": _serialize_timestamp(updated_order['dropoff_time']),
             "weight": updated_order['weight'],
             "status": updated_order['status']
         }
@@ -546,15 +550,13 @@ def delete_order(order_id):
     """Cancel an order and free up any driver/vehicle assignment immediately."""
     conn = get_db_connection()
 
-    # Get order to check if it exists
-    order = conn.execute(
-        'SELECT * FROM orders WHERE id = ?', (order_id,)).fetchone()
+    order = db.fetchone(db.execute(conn,
+        'SELECT * FROM orders WHERE id = ?', (order_id,)))
     if not order:
         conn.close()
         return jsonify({"error": "Order not found"}), 404
 
-    # Update status to cancelled and free up driver/vehicle
-    conn.execute('''
+    db.execute(conn, '''
         UPDATE orders
         SET status = 'cancelled', driver_id = NULL, vehicle_id = NULL
         WHERE id = ?
@@ -563,9 +565,6 @@ def delete_order(order_id):
     conn.close()
 
     return jsonify({"message": "Order cancelled and driver/vehicle assignment freed"}), 200
-
-
-# ==================== OTHER ENDPOINTS (for admin/internal use) ====================
 
 
 # ==================== AUTH ====================
@@ -582,12 +581,10 @@ def login():
         return jsonify({"error": "Email and password are required"}), 400
 
     conn = get_db_connection()
-    merchant = conn.execute(
-        'SELECT * FROM merchants WHERE email = ?', (email,)
-    ).fetchone()
+    merchant = db.fetchone(db.execute(conn,
+        'SELECT * FROM merchants WHERE email = ?', (email,)))
     conn.close()
 
-    # Either merchant doesn't exist or has no password configured
     if not merchant or not merchant['password_hash']:
         return jsonify({"error": "Invalid credentials"}), 401
 
@@ -632,7 +629,6 @@ def upload_csv():
         import csv
         import io
 
-        # Read CSV content
         stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
         csv_reader = csv.DictReader(stream)
 
@@ -643,9 +639,6 @@ def upload_csv():
         if csv_type == 'merchants':
             for row in csv_reader:
                 try:
-                    # Allow plaintext passwords in the CSV for the assignment.
-                    # If a "password" column is present, hash it before storing.
-                    # If only "password_hash" exists, use it as-is for backwards compatibility.
                     raw_password = row.get('password')
                     existing_hash = row.get('password_hash')
 
@@ -654,10 +647,14 @@ def upload_csv():
                     else:
                         password_hash = existing_hash
 
-                    conn.execute(
-                        'INSERT OR IGNORE INTO merchants (id, name, email, password_hash) VALUES (?, ?, ?, ?)',
-                        (row['id'], row['name'], row['email'], password_hash)
-                    )
+                    if db.using_postgres():
+                        db.execute(conn,
+                            'INSERT INTO merchants (id, name, email, password_hash) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
+                            (row['id'], row['name'], row['email'], password_hash))
+                    else:
+                        db.execute(conn,
+                            'INSERT OR IGNORE INTO merchants (id, name, email, password_hash) VALUES (?, ?, ?, ?)',
+                            (row['id'], row['name'], row['email'], password_hash))
                     count += 1
                 except Exception as e:
                     errors.append(f"Row {count + 1}: {str(e)}")
@@ -665,10 +662,14 @@ def upload_csv():
         elif csv_type == 'drivers':
             for row in csv_reader:
                 try:
-                    conn.execute(
-                        'INSERT OR IGNORE INTO drivers (id, name) VALUES (?, ?)',
-                        (row['id'], row['name'])
-                    )
+                    if db.using_postgres():
+                        db.execute(conn,
+                            'INSERT INTO drivers (id, name) VALUES (?, ?) ON CONFLICT DO NOTHING',
+                            (row['id'], row['name']))
+                    else:
+                        db.execute(conn,
+                            'INSERT OR IGNORE INTO drivers (id, name) VALUES (?, ?)',
+                            (row['id'], row['name']))
                     count += 1
                 except Exception as e:
                     errors.append(f"Row {count + 1}: {str(e)}")
@@ -676,11 +677,16 @@ def upload_csv():
         elif csv_type == 'vehicles':
             for row in csv_reader:
                 try:
-                    conn.execute(
-                        'INSERT OR IGNORE INTO vehicles (id, driver_id, max_orders, max_weight) VALUES (?, ?, ?, ?)',
-                        (row['id'], row['driver_id'],
-                         row['max_orders'], row['max_weight'])
-                    )
+                    if db.using_postgres():
+                        db.execute(conn,
+                            'INSERT INTO vehicles (id, driver_id, max_orders, max_weight) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
+                            (row['id'], row['driver_id'],
+                             row['max_orders'], row['max_weight']))
+                    else:
+                        db.execute(conn,
+                            'INSERT OR IGNORE INTO vehicles (id, driver_id, max_orders, max_weight) VALUES (?, ?, ?, ?)',
+                            (row['id'], row['driver_id'],
+                             row['max_orders'], row['max_weight']))
                     count += 1
                 except Exception as e:
                     errors.append(f"Row {count + 1}: {str(e)}")
@@ -694,13 +700,28 @@ def upload_csv():
                         'vehicle_id') and row.get('vehicle_id').strip() else None
                     description = row.get('description', '')
 
-                    # Use INSERT OR REPLACE to update existing orders
-                    conn.execute(
-                        'INSERT OR REPLACE INTO orders (id, merchant_id, driver_id, vehicle_id, status, description, pickup_time, dropoff_time, weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                        (row['id'], row['merchant_id'], driver_id, vehicle_id,
-                         row.get('status', 'pending'), description,
-                         row['pickup_time'], row['dropoff_time'], row['weight'])
-                    )
+                    if db.using_postgres():
+                        db.execute(conn,
+                            '''INSERT INTO orders (id, merchant_id, driver_id, vehicle_id, status, description, pickup_time, dropoff_time, weight)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               ON CONFLICT (id) DO UPDATE SET
+                                 merchant_id = EXCLUDED.merchant_id,
+                                 driver_id = EXCLUDED.driver_id,
+                                 vehicle_id = EXCLUDED.vehicle_id,
+                                 status = EXCLUDED.status,
+                                 description = EXCLUDED.description,
+                                 pickup_time = EXCLUDED.pickup_time,
+                                 dropoff_time = EXCLUDED.dropoff_time,
+                                 weight = EXCLUDED.weight''',
+                            (row['id'], row['merchant_id'], driver_id, vehicle_id,
+                             row.get('status', 'pending'), description,
+                             row['pickup_time'], row['dropoff_time'], row['weight']))
+                    else:
+                        db.execute(conn,
+                            'INSERT OR REPLACE INTO orders (id, merchant_id, driver_id, vehicle_id, status, description, pickup_time, dropoff_time, weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                            (row['id'], row['merchant_id'], driver_id, vehicle_id,
+                             row.get('status', 'pending'), description,
+                             row['pickup_time'], row['dropoff_time'], row['weight']))
                     count += 1
                 except Exception as e:
                     errors.append(f"Row {count + 1}: {str(e)}")
@@ -711,8 +732,8 @@ def upload_csv():
         if errors:
             return jsonify({
                 "message": f"Uploaded {count} {csv_type} with {len(errors)} errors",
-                "errors": errors[:10]  # Limit to first 10 errors
-            }), 207  # 207 Multi-Status
+                "errors": errors[:10]
+            }), 207
 
         return jsonify({
             "message": f"Successfully uploaded {count} {csv_type}",
@@ -740,16 +761,19 @@ def view_database():
 
     conn = get_db_connection()
 
-    # Get table schema
-    schema = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    columns = [col[1] for col in schema]
+    if db.using_postgres():
+        columns_cur = db.execute(conn,
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ? ORDER BY ordinal_position",
+            (table,))
+        columns = [row['column_name'] for row in db.fetchall(columns_cur)]
+    else:
+        schema = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        columns = [col[1] for col in schema]
 
-    # Get data
-    data = conn.execute(f"SELECT * FROM {table} LIMIT ?", (limit,)).fetchall()
+    data = db.fetchall(db.execute(conn, f"SELECT * FROM {table} LIMIT ?", (limit,)))
 
-    # Get total count
-    total = conn.execute(
-        f"SELECT COUNT(*) as count FROM {table}").fetchone()['count']
+    total = db.fetchone(db.execute(conn,
+        f"SELECT COUNT(*) as count FROM {table}"))['count']
 
     conn.close()
 
@@ -758,7 +782,7 @@ def view_database():
         "columns": columns,
         "total_rows": total,
         "showing": len(data),
-        "data": [dict(row) for row in data]
+        "data": data
     })
 
 
@@ -766,9 +790,9 @@ def view_database():
 def get_merchants():
     """Get all merchants."""
     conn = get_db_connection()
-    merchants = conn.execute('SELECT * FROM merchants ORDER BY id').fetchall()
+    merchants = db.fetchall(db.execute(conn, 'SELECT * FROM merchants ORDER BY id'))
     conn.close()
-    return jsonify([dict(merchant) for merchant in merchants])
+    return jsonify(merchants)
 
 
 @app.route('/merchants', methods=['POST'])
@@ -783,38 +807,40 @@ def create_merchant():
 
     conn = get_db_connection()
     try:
-        cursor = conn.execute(
-            'INSERT INTO merchants (name, email) VALUES (?, ?)',
-            (name, email)
-        )
+        if db.using_postgres():
+            cur = db.execute(conn,
+                'INSERT INTO merchants (name, email) VALUES (?, ?) RETURNING id',
+                (name, email))
+            merchant_id = db.fetchone(cur)['id']
+        else:
+            cur = db.execute(conn,
+                'INSERT INTO merchants (name, email) VALUES (?, ?)',
+                (name, email))
+            merchant_id = cur.lastrowid
         conn.commit()
-        merchant_id = cursor.lastrowid
-        merchant = conn.execute(
-            'SELECT * FROM merchants WHERE id = ?', (merchant_id,)).fetchone()
+        merchant = db.fetchone(db.execute(conn,
+            'SELECT * FROM merchants WHERE id = ?', (merchant_id,)))
         conn.close()
-        return jsonify(dict(merchant)), 201
-    except sqlite3.IntegrityError:
+        return jsonify(merchant), 201
+    except _integrity_error():
+        conn.rollback()
         conn.close()
         return jsonify({"error": "Merchant with this name or email already exists"}), 400
 
 
 # ==================== WEBSOCKET TRACKING ====================
 
-# WebSocket handlers and background tracking live in websocket_service.py.
-# Here we simply register them against this SocketIO instance.
 register_socketio_handlers(socketio)
 
 
 if __name__ == '__main__':
-    # Initialize database on startup
     init_db()
-    print(f"Database initialized at: {DATABASE_PATH}")
+    db_info = db.DATABASE_URL if db.using_postgres() else DATABASE_PATH
+    print(f"Database initialized: {'PostgreSQL' if db.using_postgres() else 'SQLite'} ({db_info})")
 
-    # Start fake location updates
     start_location_updates(socketio)
     print("Location tracking started (sending updates every 5 seconds)")
 
-    # Run the Flask app with SocketIO
     port = int(os.getenv('PORT', '8000'))
     debug_mode = os.getenv('FLASK_DEBUG', 'true').lower() == 'true'
     allow_unsafe = os.getenv('ALLOW_UNSAFE_WERKZEUG', 'true').lower() == 'true'
