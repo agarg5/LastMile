@@ -38,8 +38,11 @@ def execute(conn, sql, params=None):
     Returns a cursor.
     """
     if using_postgres():
+        import re
         import psycopg2.extras
         sql = sql.replace('?', '%s')
+        # SQLite's DATE() function doesn't exist in PostgreSQL; use ::date cast
+        sql = re.sub(r'DATE\((\w+(?:\.\w+)?)\)', r'\1::date', sql)
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     else:
         cur = conn.cursor()
@@ -67,18 +70,6 @@ def fetchall(cursor):
     if using_postgres():
         return [dict(r) for r in rows]
     return [dict(r) for r in rows]
-
-
-def lastrowid(cursor, conn, table):
-    """Get the last inserted row ID (handles both backends)."""
-    if using_postgres():
-        # For PostgreSQL, we use RETURNING id in the INSERT statement
-        # This function is a fallback using currval
-        cur = conn.cursor()
-        cur.execute(f"SELECT currval(pg_get_serial_sequence('{table}', 'id'))")
-        return cur.fetchone()[0]
-    else:
-        return cursor.lastrowid
 
 
 def init_db():
