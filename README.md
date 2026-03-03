@@ -6,6 +6,15 @@ A Python Flask backend with SQLite database and React+Tailwind frontend for mana
 
 See a video demo and explanation at https://www.loom.com/share/e2d512a7f6074f5eb1f9fe98502d3239
 
+## Live Deployment
+
+The app is deployed on Railway:
+
+- **Frontend**: https://frontend-production-6952.up.railway.app
+- **Backend API**: https://backend-production-9371.up.railway.app
+
+Login with: `primeservices@example.com` / `prime-pass`
+
 ## Features
 - authentication for merchants using JWT's. You can play around with the app by using these credentials (username: primeservices@example.com, password: prime-pass)
 - allocation algorithm to match packages, drivers, shifts
